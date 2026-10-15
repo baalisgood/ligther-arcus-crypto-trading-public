@@ -1,0 +1,559 @@
+# 5000 USDC/所方案（2026-10-14，仅本地）：钱包每边 5000；每所累计名义上限 5000、每币每所上限 1000，均仅限制新增开仓。
+# 五币固定数量、每币最多两层、每次拆半层；同时受账户 total×1 动态上限约束，名义上限不是保证金或最大亏损。
+# 保持 Lighter/Arcus 双市价与现有费用、持续性、退出和未知订单保护；余额警告/禁止开仓线 4500，严重不足线 4000 USDC。
+# 中文研究说明（仅本地注释，2026-10-11）：本文件负责当前统一分段策略、启动持仓核对和分段风控。
+# scripts/start_lighter_arcus.sh 默认 monitor，仅在临时副本覆盖 monitor_only；显式 live 才允许真实执行。
+# 每币配置覆盖 default_config 的对应字段；订单模式/限速从 arbitrage_lighter_arcus.yaml 加载，监控从 monitor_lighter_arcus.yaml 加载。
+# 数值单位须看每项：价差 0.08 表示 0.08%，手续费/滑点比例 0.001 表示 0.1%；数量是基础合约数量，价值是 USDC 名义金额。
+# 下述“当前”指本地代码与配置快照，不能推断服务器已部署；不保证盈利或止损成交上限。
+# 实现核对入口：config/symbol_config.py、core/unified_orchestrator_*、decision/unified_decision_engine.py（均在 arbitrage_monitor_v2 下）。
+# Arcus public market minima verified 2026-10-11; fees assume Lighter Standard.
+# 运行模式与数据检查；当前分段入口以 arbitrage_segmented.yaml 的此节为准。
+system_mode:
+  # true 表示监控模式，不发送策略真实订单；启动脚本在临时副本中按 monitor/live 覆盖此值。
+  monitor_only: true
+  # 行情最大允许年龄，单位秒；过旧报价不用于正常决策。分段入口使用分段文件的 2.5 秒。
+  data_freshness_seconds: 2.5
+  # true 启动时查询并核对真实持仓，尝试恢复可识别的配对状态；不是无条件接管任何旧仓。
+  bootstrap_positions_on_startup: true
+  # true 在启动持仓核对成功前锁住新开仓；失败不应视为空仓。
+  bootstrap_positions_block_open_until_success: true
+  # 启动单次持仓查询等待时间，单位秒；30 秒超时后进入失败/重试处理。
+  bootstrap_positions_fetch_timeout_seconds: 30
+  # 启动核对失败后的重试间隔，单位秒；当前 10 秒。
+  bootstrap_positions_retry_interval_seconds: 10
+  # 启动核对重试次数参数；当前 5 次，耗尽后保留失败状态/开仓闭锁，不保证成功。
+  bootstrap_positions_retry_max_attempts: 5
+  # 空仓确认总轮数，包含首轮；当前 10 轮（首轮后最多追加 9 轮），核对余额、挂单、持仓快照。
+  bootstrap_positions_empty_confirm_attempts: 10
+  # 追加空仓确认间隔，单位秒；当前 1 秒。
+  bootstrap_positions_empty_confirm_interval_seconds: 1
+  # true 启动时两腿不匹配则阻止新开仓；不自动消除真实敞口。
+  bootstrap_positions_block_open_on_mismatch: true
+  # 两腿数量核对容差，单位基础数量；实际比较取本值与引擎 quantity_epsilon 的较大者，0 不关闭检查。
+  bootstrap_positions_qty_tolerance: 0
+# 分段决策的费用估算设置；不等于旧 V3 的 arbitrage_decision。
+decision:
+  # 是否在分段开仓净价差判定中扣除估算开平仓费用；true 开启，不代表保证净盈利。
+  deduct_fees: true
+  # 按交易所配置估算费率；分段此表按交易所覆盖执行配置 exchange_fees 的同名项。
+  exchange_fee_config:
+    # 未单列交易所或币种时的回退设置。
+    default:
+      # 限价单估算费率，单位为小数比例（0.0001=0.01%）；0 表示按零费用估算，非账户实际费率证明。
+      limit_fee_rate: 0
+      # 市价单估算费率，单位为小数比例；0.000225=0.0225%，0 表示按零费用估算；实际收费须以成交对账为准。
+      market_fee_rate: 0
+    # lighter 专用设置；同组内优先于 default。
+    lighter:
+      # 限价单估算费率，单位为小数比例（0.0001=0.01%）；0 表示按零费用估算，非账户实际费率证明。
+      limit_fee_rate: 0
+      # 市价单估算费率，单位为小数比例；0.000225=0.0225%，0 表示按零费用估算；实际收费须以成交对账为准。
+      market_fee_rate: 0
+    # arcus 专用设置；同组内优先于 default。
+    arcus:
+      # 限价单估算费率，单位为小数比例（0.0001=0.01%）；0 表示按零费用估算，非账户实际费率证明。
+      limit_fee_rate: 0
+      # 市价单估算费率，单位为小数比例；0.000225=0.0225%，0 表示按零费用估算；实际收费须以成交对账为准。
+      market_fee_rate: 0.000225
+# 风险控制参数组；具体生效范围见下方各节说明。
+risk_control:
+  # 账户余额监控；分段入口使用分段文件本节，严重不足优先于普通警告检查。
+  balance_management:
+    # 每所 USDC 余额警告线 4500；低于此线触发低余额处理，低于严重线 4000 时优先走严重不足分支。
+    min_balance_warning: 4500.0
+    # 每所严重余额不足线 4000 USDC；低于此线触发严重余额处理及已绑定的受控平仓回调，不保证立即全部成交。
+    min_balance_close_position: 4000.0
+    # 严重余额不足的平仓方式；grid_sequential 表示按网格顺序受控减仓，仍受订单状态与安全检查约束。
+    force_close_mode: grid_sequential
+    # 本组检查周期，单位秒；不是逐笔成交超时。
+    check_interval: 10
+    # 是否请求声音告警；true 开启、false 关闭，是否听到取决于终端环境。
+    sound_alarm_enabled: true
+  # 只限制新增开仓的守卫；满足低账户余额、仓位价值或波动条件时保留受控平仓路径。
+  open_only_close:
+    # 按 UI 账户缓存的 USDC/USD total 检查开仓准入：Arcus 为权益，Lighter 为抵押品；不统一等同权益。
+    low_balance:
+      # 本组开关；true 为启用。
+      enabled: true
+      # 每所上述账户 total 字段的最低门槛 4500 USDC；低于阈值阻止新增开仓；缺 total 时回退 free+used。
+      min_equity_usdc: 4500.0
+      # 是否请求声音告警；true 开启、false 关闭，是否听到取决于终端环境。
+      sound_alarm_enabled: true
+      # 按交易所覆盖上述账户 total 字段的最低门槛；空字典表示全部使用 min_equity_usdc。
+      min_equity_usdc_by_exchange: {}
+    # 每所持仓名义价值静态上限，控制新增开仓，不是本金或最大亏损。
+    max_exchange_position_value:
+      # 本组开关；true 为启用。
+      enabled: true
+      # 每所全部币种累计名义持仓价值上限 5000 USDC；实时已有仓位加本单超过限制时禁止新增开仓，不是保证金或最大亏损。
+      max_value_usdc: 5000.0
+      # 是否请求声音告警；true 开启、false 关闭，是否听到取决于终端环境。
+      sound_alarm_enabled: false
+      # 按交易所覆盖静态仓位价值上限；空字典表示使用统一 max_value_usdc。
+      max_value_usdc_by_exchange: {}
+    # 以上述账户 total 字段（Arcus 权益/Lighter 抵押品）乘倍数得到动态仓位价值限制；与静态上限共同约束新增开仓。
+    dynamic_max_exchange_position_value:
+      # 本组开关；true 为启用。
+      enabled: true
+      # 动态名义价值上限=上述账户 total 字段×此倍数；1.0 是倍数，不是 1.0%，也不会设置交易所杠杆。
+      equity_multiplier: 1.0
+    # 触发币种的窗口内价格振幅守卫；达到阈值后暂时禁止新增开仓。
+    price_volatility:
+      # 用这些基础币种的价格检测波动；此列表不等于完整交易币种列表。
+      trigger_symbols:
+      # 本列表中的交易所/币种标识，按原顺序保留。
+      - BTC
+      # 本列表中的交易所/币种标识，按原顺序保留。
+      - ETH
+      # 本列表中的交易所/币种标识，按原顺序保留。
+      - SOL
+      # 本组开关；true 为启用。
+      enabled: true
+      # 本守卫的滚动统计窗口，单位秒；只统计该组对应的事件或价格。
+      window_seconds: 300
+      # 价格振幅阈值，单位百分比数值；3 表示 3%，不是 300%。
+      threshold_pct: 3
+      # 波动触发后的禁止开仓时长，单位秒；1800=30 分钟。
+      block_seconds: 1800
+      # true 表示触发后对全部币种限制开仓；false 仅针对触发币种。
+      apply_to_all_symbols: true
+      # 是否请求声音告警；true 开启、false 关闭，是否听到取决于终端环境。
+      sound_alarm_enabled: true
+  # 连续执行失败触发全局暂停；暂停与只开仓守卫不同，可能阻止正常开平仓。
+  execution_pause:
+    # 本组开关；true 为启用。
+    enabled: true
+    # 此组累计失败触发门槛，单位次；计数口径分别由执行失败/API 失败逻辑处理。
+    consecutive_failures: 3
+    # 执行失败后的暂停时长，单位分钟；45=2700 秒。
+    pause_minutes: 45
+  # 成交后滑点触发暂停；这是事后风控，不是下单前保护价或亏损封顶。
+  slippage_pause:
+    # 本组开关；true 为启用。
+    enabled: true
+    # 不利滑点阈值，百分比数值；0.08 表示 0.08%，触发后使用本组暂停时长。
+    negative_slippage_threshold_pct: 0.08
+    # 本组触发后的暂停时长，单位秒；实际恢复还须满足其他安全条件。
+    pause_seconds: 900
+    # 本组重复触发或执行的冷却时间，单位秒；避免短时间反复触发。
+    cooldown_seconds: 60
+    # 是否将开仓成交滑点纳入本组检查；true 纳入。
+    apply_to_open: true
+    # 是否将平仓成交滑点纳入本组检查；true 纳入，触发可能影响后续正常平仓。
+    apply_to_close: true
+    # 滚动窗口内多次负滑点触发暂停的附加规则。
+    burst_negative_slippage_pause:
+      # 本组开关；true 为启用。
+      enabled: true
+      # 本守卫的滚动统计窗口，单位秒；只统计该组对应的事件或价格。
+      window_seconds: 180
+      # 窗口内达到的事件次数门槛；不等于累计终身成交次数。
+      count_threshold: 5
+    # 近若干成功成交出现高滑点时请求重连的规则；当前关闭，不是强制平仓。
+    high_slippage_reconnect:
+      # 本组开关；false 为关闭，本组其余参数暂不触发该功能。
+      enabled: false
+      # 统计最近的成功成交样本数量，单位次；仅本重连规则开启时有意义。
+      window_trades: 10
+      # 窗口内达到的事件次数门槛；不等于累计终身成交次数。
+      count_threshold: 5
+      # 高滑点计数阈值，百分比数值；0.01 表示 0.01%，当前重连规则关闭。
+      high_slippage_threshold_pct: 0.01
+      # 本组重复触发或执行的冷却时间，单位秒；避免短时间反复触发。
+      cooldown_seconds: 300
+  # API 失败暂停规则；当前关闭，本节参数不启用该暂停，其他账户异常检查仍可拦截开仓。
+  api_failure_pause:
+    # 本组开关；false 为关闭，本组其余参数暂不触发该功能。
+    enabled: false
+    # 此组累计失败触发门槛，单位次；计数口径分别由执行失败/API 失败逻辑处理。
+    consecutive_failures: 10
+    # 同一交易所失败计数的最小间隔，单位秒；用于计数节流，不是所有 API 的请求间隔。
+    min_interval_seconds: 30
+    # 本守卫的滚动统计窗口，单位秒；只统计该组对应的事件或价格。
+    window_seconds: 600
+    # 本组触发后的暂停时长，单位秒；实际恢复还须满足其他安全条件。
+    pause_seconds: 900
+  # 订单 WebSocket 成交回报延迟的暂停规则；不代表所有行情 WebSocket 延迟。
+  order_ws_latency_pause:
+    # 本组开关；true 为启用。
+    enabled: true
+    # 订单回报延迟触发线，单位秒；当前 3.2 秒。
+    threshold_seconds: 3.2
+    # 本组触发后的暂停时长，单位秒；实际恢复还须满足其他安全条件。
+    pause_seconds: 1000
+    # 该延迟暂停是否同时阻止自动纠偏；false 不额外阻止，但自动纠偏总开关当前仍关闭。
+    block_position_alignment_auto_fix: false
+  # 持仓复核不一致时自动下单纠偏；当前关闭，不能视为会自动修复残腿。
+  position_alignment_auto_fix:
+    # 本组开关；false 为关闭，本组其余参数暂不触发该功能。
+    enabled: false
+    # 本组重复触发或执行的冷却时间，单位秒；避免短时间反复触发。
+    cooldown_seconds: 15
+    # 纠偏滚动窗口允许的最多执行次数；当前 3 次，0 表示不设此次数限制，开关关闭时不执行。
+    max_executions_per_window: 3
+    # 本守卫的滚动统计窗口，单位秒；只统计该组对应的事件或价格。
+    window_seconds: 14400
+  # 持仓持续不一致触发全局暂停；暂停不会自动修正账户仓位。
+  position_mismatch_pause:
+    # 本组开关；true 为启用。
+    enabled: true
+    # 持续不一致的触发时间，单位秒；当前 10 秒。
+    mismatch_seconds: 10
+# 订单等待、重试与保护参数组；注意分段文件同名根节的消费边界。 当前统一入口未找到对分段根 order_execution 的读取；实际执行使用执行文件 arbitrage_execution.order_execution。
+order_execution:
+  # 限价单等待超时，单位秒；超时进入撤单/状态确认等处理，不保证此时已完成平仓。 当前统一入口未找到对分段根 order_execution 的读取；实际执行使用执行文件 arbitrage_execution.order_execution。
+  limit_order_timeout: 10
+  # Lighter 市价单成交状态等待上限，单位秒；超时不等于确认未成交。 当前统一入口未找到对分段根 order_execution 的读取；实际执行使用执行文件 arbitrage_execution.order_execution。
+  lighter_market_order_timeout: 10
+  # 一般执行重试次数参数；未知成交状态受保护，不代表可盲目重复发单。 当前统一入口未找到对分段根 order_execution 的读取；实际执行使用执行文件 arbitrage_execution.order_execution。
+  max_retry_count: 3
+# 各币种的默认分段配置；symbol_configs 按同名分组字段覆盖，未写的字段继承这里。
+default_config:
+  # 以下默认初始门槛 0.03%、阶梯 0.03 个百分点及 5 层均被当前五币覆盖，未用于这五币的实际网格。
+  # 开平仓阶梯、持续性、盘口和价格保护设置；价差参数通常使用百分比数值。
+  grid_config:
+    # 第 1 格开仓门槛，单位百分比数值（0.08=0.08%）；当前 deduct_fees=true，比较扣估算往返费用后的价差，还须通过其他守卫。
+    initial_spread_threshold: 0.03
+    # 相邻阶梯的价差增量，单位百分点；第 n 格门槛=初始门槛+(n−1)×本值。
+    grid_step: 0.03
+    # 最多目标网格层数，单位格；与每格 base_quantity 共同确定目标数量，不是美元额度。
+    max_segments: 5
+    # 每次实际拆单的数量上限，单位为本币合约基础数量；quantity_config 中本字段优先于 grid_config。
+    split_order_size: 1.0
+    # 剥头皮模式开关；当前 false，相关触发格数和剥头皮止盈参数暂不启用。
+    scalping_enabled: false
+    # 达到该网格层数后才考虑剥头皮；当前总开关关闭。
+    scalping_trigger_segment: 10
+    # 剥头皮盈利触发阈值，百分比数值；0.02=0.02%，仅 scalping_enabled 开启时参与。
+    scalping_profit_threshold: 0.02
+    # 已加载的旧平仓模式字段；当前统一网格路径不按此值切换，实际使用首格 initial×0.4、其余前一格门槛。
+    use_symmetric_close: true
+    # 旧非对称平仓目标差值，单位百分点（0.045 表示 0.045 个百分点）；当前统一网格路径不消费此字段。
+    profit_per_segment: 0.045
+    # 已加载的旧剥头皮阈值字段，单位百分比数值；当前统一决策入口未找到消费，不要混同 scalping_profit_threshold。
+    scalp_profit_threshold: 0.02
+    # 价差须持续满足的观察窗口，单位秒；当前分段默认 3 秒，具体还受严格检查和采样覆盖约束。
+    spread_persistence_seconds: 3
+    # true 使用严格持续性检查；不能仅凭窗口内某一瞬间越线开仓。
+    strict_persistence_check: true
+    # 是否校验对手盘可用数量；true 开启，盘口不足时拦截对应执行。
+    require_orderbook_liquidity: true
+    # 对手盘最小数量要求，单位为该币基础数量，不是 USDC；与实际订单需求共同检查。
+    min_orderbook_quantity: 0.01
+    # 用于价格/深度聚合的盘口档数；1 为最优一档，不具备多档数据的来源不能据此生成多档。
+    orderbook_aggregate_levels: 1
+    # 跳过深度检查的交易所名单；空列表表示没有显式豁免。
+    skip_orderbook_liquidity_exchanges: []
+    # 下单滑点容忍比例；0.001=0.1%，优先于执行配置 max_slippage；保护价不保证实际总亏损封顶。
+    slippage_tolerance: 0.001
+    # 盘口价格稳定性观察窗口，单位秒；当前 2 秒。
+    price_stability_window_seconds: 2
+    # 窗口内价格变化门槛，百分比数值；0.02 表示 0.02%。
+    price_stability_threshold_pct: 0.02
+    # 单所自身买卖盘口点差上限，百分比数值；0.05=0.05%，0.1=0.1%，不是跨所开仓门槛。
+    max_local_orderbook_spread_pct: 0.05
+    # 是否启用 EMA 平滑价差门槛；当前 false，以下 EMA 参数保留但不启用该守卫。
+    ema_spread_gate_enabled: false
+    # EMA 平滑窗口，单位秒；仅 EMA 守卫开启时有效。
+    ema_spread_window_seconds: 6
+    # EMA 门槛容许偏差，单位百分点；开仓门槛减此值，平仓门槛加此值。
+    ema_spread_deviation_pct: 0.011
+    # true 要求逐秒样本完整，断秒会拦截相应检查；当前 EMA 总开关关闭。
+    ema_spread_strict_samples_per_second: true
+  # 数量参数组；分段入口由分段文件控制每格数量和拆单，不能用执行文件旧数量表推算本策略仓位。
+  quantity_config:
+    # 每格目标基础数量；fixed 模式按此固定数量计算目标仓位，不随账户余额自动调整。
+    base_quantity: 1.0
+    # 数量模式；fixed 使用 base_quantity，value 按 target_value_usdc 与价格折算。当前全部为 fixed。
+    quantity_mode: fixed
+    # value 模式的目标名义价值，单位 USDC；当前 fixed 模式不以此金额重新计算下单数量。
+    target_value_usdc: 100.0
+    # 数量允许的小数位数；不是价格精度，还须符合市场步长和最小下单限制。
+    quantity_precision: 2
+    # 各交易所最低基础数量；指定交易所优先，缺失时用 default，并同时检查 market_constraints。
+    min_exchange_order_qty:
+      # 最低基础数量的回退值；未单独列出的交易所使用此值。
+      default: 0.0
+  # 币种风险参数；是否实际生效须看字段说明，不能将仅加载字段当成保护。
+  risk_config:
+    # 每币每所名义价值上限 1000 USDC；开仓前用实时有效报价检查已有仓位加本单，超过上限拒绝新增，平仓不受限制。
+    max_position_value: 1000.0
+    # 本地当前代码：配对仓位含估算开平费用的损失÷平均单腿开仓名义价值达到 2% 时请求退出。
+    # 不是账户回撤，也非亏损保证封顶；依赖有效反向报价及可执行平仓。
+    max_loss_percent: 2.0
+    # 资金费风险字段；当前分段入口仅找到加载，未找到此字段对应的执行检查，不保证 true 会启用保护。
+    enable_funding_rate_risk: true
+    # 不利资金费持续时间字段，单位小时；当前分段入口未找到使用，不保证 8 小时自动退出。
+    max_unfavorable_funding_hours: 8
+    # 资金费率差阈值字段，百分比数值；分段 risk_config 当前仅加载，未找到相应消费。
+    funding_rate_diff_threshold: 0.01
+# 按标准交易对覆盖默认配置；各币种未列出的分组字段继承 default_config。
+symbol_configs:
+  # BTC-USDC-PERP 的独立参数；基础数量单位为该币种，不是 USDC 金额。
+  BTC-USDC-PERP:
+    # 本币独立配置开关；true 加载本币覆盖项。
+    enabled: true
+    # 开平仓阶梯、持续性、盘口和价格保护设置；价差参数通常使用百分比数值。
+    grid_config:
+      # 第 1 格开仓门槛，单位百分比数值（0.02=0.02%）；当前 deduct_fees=true，比较扣估算往返费用后的价差，还须通过其他守卫。
+      initial_spread_threshold: 0.02
+      # 相邻阶梯的价差增量，单位百分点；第 n 格门槛=初始门槛+(n−1)×本值。
+      grid_step: 0.01
+      # 最多目标网格层数，单位格；与每格 base_quantity 共同确定目标数量，不是美元额度。
+      max_segments: 2
+      # 对手盘深度至少 0.0025 BTC，覆盖单次拆单；实际订单需求仍须通过深度检查。
+      require_orderbook_liquidity: true
+      min_orderbook_quantity: 0.0025
+      # 限价保护偏移的绝对价格金额，单位为报价币/基础单位；例如 BTC 的 1800 是价格差，不是 1800%。
+      # 本值传递给支持该参数的限价/保护价路径；生效与订单模式、适配器有关，不等同当前市价单必然偏移。
+      limit_price_offset_abs: 1800
+      # 单所自身买卖盘口点差上限，百分比数值；0.05=0.05%，0.1=0.1%，不是跨所开仓门槛。
+      max_local_orderbook_spread_pct: 0.05
+      # 下单滑点容忍比例；0.001=0.1%，优先于执行配置 max_slippage；保护价不保证实际总亏损封顶。
+      slippage_tolerance: 0.001
+    # 数量参数组；分段入口由分段文件控制每格数量和拆单，不能用执行文件旧数量表推算本策略仓位。
+    quantity_config:
+      # 每格目标数量 0.005 BTC；fixed 模式最多两层，不随账户余额自动调整，另受每币每所 1000 USDC 上限约束。
+      base_quantity: 0.005
+      # 每次实际拆单最多 0.0025 BTC（半格）；quantity_config 中本字段优先于 grid_config。
+      split_order_size: 0.0025
+      # 数量模式；fixed 使用 base_quantity，value 按 target_value_usdc 与价格折算。当前全部为 fixed。
+      quantity_mode: fixed
+      # 数量允许的小数位数；不是价格精度，还须符合市场步长和最小下单限制。
+      quantity_precision: 5
+      # value 模式的目标名义价值，单位 USDC；当前 fixed 模式不以此金额重新计算下单数量。
+      target_value_usdc: 1000.0
+      # 各交易所最低基础数量；指定交易所优先，缺失时用 default，并同时检查 market_constraints。
+      min_exchange_order_qty:
+        # 最低基础数量的回退值；未单独列出的交易所使用此值。
+        default: 0.0001
+        # 最低基础数量的lighter 专用值；优先于 default。
+        lighter: 0.00007
+        # 最低基础数量的arcus 专用值；优先于 default。
+        arcus: 0.0001
+  # ETH-USDC-PERP 的独立参数；基础数量单位为该币种，不是 USDC 金额。
+  ETH-USDC-PERP:
+    # 本币独立配置开关；true 加载本币覆盖项。
+    enabled: true
+    # 开平仓阶梯、持续性、盘口和价格保护设置；价差参数通常使用百分比数值。
+    grid_config:
+      # 第 1 格开仓门槛，单位百分比数值（0.02=0.02%）；当前 deduct_fees=true，比较扣估算往返费用后的价差，还须通过其他守卫。
+      initial_spread_threshold: 0.02
+      # 相邻阶梯的价差增量，单位百分点；第 n 格门槛=初始门槛+(n−1)×本值。
+      grid_step: 0.01
+      # 最多目标网格层数，单位格；与每格 base_quantity 共同确定目标数量，不是美元额度。
+      max_segments: 2
+      # 对手盘深度至少 0.075 ETH，覆盖单次拆单；实际订单需求仍须通过深度检查。
+      require_orderbook_liquidity: true
+      min_orderbook_quantity: 0.075
+      # 限价保护偏移的绝对价格金额，单位为报价币/基础单位；例如 BTC 的 1800 是价格差，不是 1800%。
+      # 本值传递给支持该参数的限价/保护价路径；生效与订单模式、适配器有关，不等同当前市价单必然偏移。
+      limit_price_offset_abs: 62
+      # 单所自身买卖盘口点差上限，百分比数值；0.05=0.05%，0.1=0.1%，不是跨所开仓门槛。
+      max_local_orderbook_spread_pct: 0.05
+    # 数量参数组；分段入口由分段文件控制每格数量和拆单，不能用执行文件旧数量表推算本策略仓位。
+    quantity_config:
+      # 每格目标数量 0.15 ETH；fixed 模式最多两层，不随账户余额自动调整，另受每币每所 1000 USDC 上限约束。
+      base_quantity: 0.15
+      # 每次实际拆单最多 0.075 ETH（半格）；quantity_config 中本字段优先于 grid_config。
+      split_order_size: 0.075
+      # 数量模式；fixed 使用 base_quantity，value 按 target_value_usdc 与价格折算。当前全部为 fixed。
+      quantity_mode: fixed
+      # 数量允许的小数位数；不是价格精度，还须符合市场步长和最小下单限制。
+      quantity_precision: 4
+      # value 模式的目标名义价值，单位 USDC；当前 fixed 模式不以此金额重新计算下单数量。
+      target_value_usdc: 500.0
+      # 各交易所最低基础数量；指定交易所优先，缺失时用 default，并同时检查 market_constraints。
+      min_exchange_order_qty:
+        # 最低基础数量的回退值；未单独列出的交易所使用此值。
+        default: 0.002
+        # 最低基础数量的lighter 专用值；优先于 default。
+        lighter: 0.002
+        # 最低基础数量的arcus 专用值；优先于 default。
+        arcus: 0.001
+  # SOL-USDC-PERP 的独立参数；基础数量单位为该币种，不是 USDC 金额。
+  SOL-USDC-PERP:
+    # 本币独立配置开关；true 加载本币覆盖项。
+    enabled: true
+    # 开平仓阶梯、持续性、盘口和价格保护设置；价差参数通常使用百分比数值。
+    grid_config:
+      # 第 1 格开仓门槛，单位百分比数值（0.02=0.02%）；当前 deduct_fees=true，比较扣估算往返费用后的价差，还须通过其他守卫。
+      initial_spread_threshold: 0.02
+      # 相邻阶梯的价差增量，单位百分点；第 n 格门槛=初始门槛+(n−1)×本值。
+      grid_step: 0.01
+      # 最多目标网格层数，单位格；与每格 base_quantity 共同确定目标数量，不是美元额度。
+      max_segments: 2
+      # 对手盘深度至少 1.5 SOL，覆盖单次拆单；实际订单需求仍须通过深度检查。
+      require_orderbook_liquidity: true
+      min_orderbook_quantity: 1.5
+      # 限价保护偏移的绝对价格金额，单位为报价币/基础单位；例如 BTC 的 1800 是价格差，不是 1800%。
+      # 本值传递给支持该参数的限价/保护价路径；生效与订单模式、适配器有关，不等同当前市价单必然偏移。
+      limit_price_offset_abs: 3
+      # 单所自身买卖盘口点差上限，百分比数值；0.05=0.05%，0.1=0.1%，不是跨所开仓门槛。
+      max_local_orderbook_spread_pct: 0.05
+    # 数量参数组；分段入口由分段文件控制每格数量和拆单，不能用执行文件旧数量表推算本策略仓位。
+    quantity_config:
+      # 每格目标数量 3 SOL；fixed 模式最多两层，不随账户余额自动调整，另受每币每所 1000 USDC 上限约束。
+      base_quantity: 3
+      # 每次实际拆单最多 1.5 SOL（半格）；quantity_config 中本字段优先于 grid_config。
+      split_order_size: 1.5
+      # 数量模式；fixed 使用 base_quantity，value 按 target_value_usdc 与价格折算。当前全部为 fixed。
+      quantity_mode: fixed
+      # 数量允许的小数位数；不是价格精度，还须符合市场步长和最小下单限制。
+      quantity_precision: 3
+      # value 模式的目标名义价值，单位 USDC；当前 fixed 模式不以此金额重新计算下单数量。
+      target_value_usdc: 500.0
+      # 各交易所最低基础数量；指定交易所优先，缺失时用 default，并同时检查 market_constraints。
+      min_exchange_order_qty:
+        # 最低基础数量的回退值；未单独列出的交易所使用此值。
+        default: 0.055
+        # 最低基础数量的lighter 专用值；优先于 default。
+        lighter: 0.055
+        # 最低基础数量的arcus 专用值；优先于 default。
+        arcus: 0.01
+  # HYPE-USDC-PERP 的独立参数；基础数量单位为该币种，不是 USDC 金额。
+  HYPE-USDC-PERP:
+    # 本币独立配置开关；true 加载本币覆盖项。
+    enabled: true
+    # 开平仓阶梯、持续性、盘口和价格保护设置；价差参数通常使用百分比数值。
+    grid_config:
+      # 第 1 格开仓门槛，单位百分比数值（0.02=0.02%）；当前 deduct_fees=true，比较扣估算往返费用后的价差，还须通过其他守卫。
+      initial_spread_threshold: 0.02
+      # 相邻阶梯的价差增量，单位百分点；第 n 格门槛=初始门槛+(n−1)×本值。
+      grid_step: 0.01
+      # 最多目标网格层数，单位格；与每格 base_quantity 共同确定目标数量，不是美元额度。
+      max_segments: 2
+      # 对手盘深度至少 2 HYPE，覆盖单次拆单；实际订单需求仍须通过深度检查。
+      require_orderbook_liquidity: true
+      min_orderbook_quantity: 2
+      # 限价保护偏移的绝对价格金额，单位为报价币/基础单位；例如 BTC 的 1800 是价格差，不是 1800%。
+      # 本值传递给支持该参数的限价/保护价路径；生效与订单模式、适配器有关，不等同当前市价单必然偏移。
+      limit_price_offset_abs: 0.5
+      # 单所自身买卖盘口点差上限，百分比数值；0.05=0.05%，0.1=0.1%，不是跨所开仓门槛。
+      max_local_orderbook_spread_pct: 0.1
+    # 数量参数组；分段入口由分段文件控制每格数量和拆单，不能用执行文件旧数量表推算本策略仓位。
+    quantity_config:
+      # 每格目标数量 4 HYPE；fixed 模式最多两层，不随账户余额自动调整，另受每币每所 1000 USDC 上限约束。
+      base_quantity: 4
+      # 每次实际拆单最多 2 HYPE（半格）；quantity_config 中本字段优先于 grid_config。
+      split_order_size: 2
+      # 数量模式；fixed 使用 base_quantity，value 按 target_value_usdc 与价格折算。当前全部为 fixed。
+      quantity_mode: fixed
+      # 数量允许的小数位数；不是价格精度，还须符合市场步长和最小下单限制。
+      quantity_precision: 2
+      # value 模式的目标名义价值，单位 USDC；当前 fixed 模式不以此金额重新计算下单数量。
+      target_value_usdc: 500.0
+      # 各交易所最低基础数量；指定交易所优先，缺失时用 default，并同时检查 market_constraints。
+      min_exchange_order_qty:
+        # 最低基础数量的回退值；未单独列出的交易所使用此值。
+        default: 0.1
+        # 最低基础数量的lighter 专用值；优先于 default。
+        lighter: 0.07
+        # 最低基础数量的arcus 专用值；优先于 default。
+        arcus: 0.1
+  # BNB-USDC-PERP 的独立参数；基础数量单位为该币种，不是 USDC 金额。
+  BNB-USDC-PERP:
+    # 本币独立配置开关；true 加载本币覆盖项。
+    enabled: true
+    # 开平仓阶梯、持续性、盘口和价格保护设置；价差参数通常使用百分比数值。
+    grid_config:
+      # 第 1 格开仓门槛，单位百分比数值（0.02=0.02%）；当前 deduct_fees=true，比较扣估算往返费用后的价差，还须通过其他守卫。
+      initial_spread_threshold: 0.02
+      # 相邻阶梯的价差增量，单位百分点；第 n 格门槛=初始门槛+(n−1)×本值。
+      grid_step: 0.01
+      # 最多目标网格层数，单位格；与每格 base_quantity 共同确定目标数量，不是美元额度。
+      max_segments: 2
+      # 限价保护偏移的绝对价格金额，单位为报价币/基础单位；例如 BTC 的 1800 是价格差，不是 1800%。
+      # 本值传递给支持该参数的限价/保护价路径；生效与订单模式、适配器有关，不等同当前市价单必然偏移。
+      limit_price_offset_abs: 0.01
+      # 单所自身买卖盘口点差上限，百分比数值；0.05=0.05%，0.1=0.1%，不是跨所开仓门槛。
+      max_local_orderbook_spread_pct: 0.1
+      # 下单滑点容忍比例；0.001=0.1%，优先于执行配置 max_slippage；保护价不保证实际总亏损封顶。
+      slippage_tolerance: 0.001
+      # 是否校验对手盘可用数量；true 开启，盘口不足时拦截对应执行。
+      require_orderbook_liquidity: true
+      # BNB 对手盘最小深度为 0.25 BNB，覆盖单次拆单；实际要求取此值与本次订单数量的较大者，深度检查保持开启。
+      min_orderbook_quantity: 0.25
+    # 数量参数组；分段入口由分段文件控制每格数量和拆单，不能用执行文件旧数量表推算本策略仓位。
+    quantity_config:
+      # 每格目标数量 0.5 BNB；fixed 模式最多两层，不随账户余额自动调整，另受每币每所 1000 USDC 上限约束。
+      base_quantity: 0.5
+      # 每次实际拆单最多 0.25 BNB（半格）；quantity_config 中本字段优先于 grid_config。
+      split_order_size: 0.25
+      # 数量模式；fixed 使用 base_quantity，value 按 target_value_usdc 与价格折算。当前全部为 fixed。
+      quantity_mode: fixed
+      # 数量允许的小数位数；不是价格精度，还须符合市场步长和最小下单限制。
+      quantity_precision: 2
+      # value 模式的目标名义价值，单位 USDC；当前 fixed 模式不以此金额重新计算下单数量。
+      target_value_usdc: 500.0
+      # 各交易所最低基础数量；指定交易所优先，缺失时用 default，并同时检查 market_constraints。
+      min_exchange_order_qty:
+        # 最低基础数量的回退值；未单独列出的交易所使用此值。
+        default: 0.01
+        # 最低基础数量的lighter 专用值；优先于 default。
+        lighter: 0.01
+        # 最低基础数量的arcus 专用值；优先于 default。
+        arcus: 0.001
+# 本地市场数量/名义金额约束，执行前检查；这是配置快照，不会自动同步交易所最新规则。
+market_constraints:
+  # BTC 市场约束；与上方币种数量参数共同检查。
+  BTC:
+    # 下单数量步长；引号内是精确十进制字符串，执行校验时转换，必须保持格式与类型。
+    quantity_step: '.00001'
+    # 该币种最低基础数量；不是美元金额，另须满足各所最低名义金额。
+    min_quantity: '.0001'
+    # 各交易所每腿最低名义金额，单位 USDC；订单数量×价格不足时拒绝，不自动放大数量。
+    min_notional_by_exchange:
+      # lighter 每腿最低名义金额，单位 USDC；当前 10 USDC。
+      lighter: 10
+      # arcus 每腿最低名义金额，单位 USDC；当前 5 USDC。
+      arcus: 5
+  # ETH 市场约束；与上方币种数量参数共同检查。
+  ETH:
+    # 下单数量步长；引号内是精确十进制字符串，执行校验时转换，必须保持格式与类型。
+    quantity_step: '.0001'
+    # 该币种最低基础数量；不是美元金额，另须满足各所最低名义金额。
+    min_quantity: '.002'
+    # 各交易所每腿最低名义金额，单位 USDC；订单数量×价格不足时拒绝，不自动放大数量。
+    min_notional_by_exchange:
+      # lighter 每腿最低名义金额，单位 USDC；当前 10 USDC。
+      lighter: 10
+      # arcus 每腿最低名义金额，单位 USDC；当前 5 USDC。
+      arcus: 5
+  # BNB 市场约束；与上方币种数量参数共同检查。
+  BNB:
+    # 下单数量步长；引号内是精确十进制字符串，执行校验时转换，必须保持格式与类型。
+    quantity_step: '.01'
+    # 该币种最低基础数量；不是美元金额，另须满足各所最低名义金额。
+    min_quantity: '.01'
+    # 各交易所每腿最低名义金额，单位 USDC；订单数量×价格不足时拒绝，不自动放大数量。
+    min_notional_by_exchange:
+      # lighter 每腿最低名义金额，单位 USDC；当前 10 USDC。
+      lighter: 10
+      # arcus 每腿最低名义金额，单位 USDC；当前 5 USDC。
+      arcus: 5
+  # SOL 市场约束；与上方币种数量参数共同检查。
+  SOL:
+    # 下单数量步长；引号内是精确十进制字符串，执行校验时转换，必须保持格式与类型。
+    quantity_step: '.001'
+    # 该币种最低基础数量；不是美元金额，另须满足各所最低名义金额。
+    min_quantity: '.055'
+    # 各交易所每腿最低名义金额，单位 USDC；订单数量×价格不足时拒绝，不自动放大数量。
+    min_notional_by_exchange:
+      # lighter 每腿最低名义金额，单位 USDC；当前 10 USDC。
+      lighter: 10
+      # arcus 每腿最低名义金额，单位 USDC；当前 5 USDC。
+      arcus: 5
+  # HYPE 市场约束；与上方币种数量参数共同检查。
+  HYPE:
+    # 下单数量步长；引号内是精确十进制字符串，执行校验时转换，必须保持格式与类型。
+    quantity_step: '.01'
+    # 该币种最低基础数量；不是美元金额，另须满足各所最低名义金额。
+    min_quantity: '.1'
+    # 各交易所每腿最低名义金额，单位 USDC；订单数量×价格不足时拒绝，不自动放大数量。
+    min_notional_by_exchange:
+      # lighter 每腿最低名义金额，单位 USDC；当前 10 USDC。
+      lighter: 10
+      # arcus 每腿最低名义金额，单位 USDC；当前 5 USDC。
+      arcus: 5
