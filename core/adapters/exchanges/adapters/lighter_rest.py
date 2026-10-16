@@ -878,6 +878,49 @@ class LighterRest(LighterBase):
                 return deepcopy(order)
         return None
 
+    def _resolve_account_equity(self, account, collateral: Decimal) -> Decimal:
+        """返回含未实现盈亏的账户权益。
+
+        1. total_asset_value（Lighter 官方字段，= collateral + 未实现盈亏）
+        2. collateral + Σ positions[].unrealized_pnl
+        严格模式下无法可靠得到权益（非零持仓缺 unrealized_pnl / 数值非法）时抛出
+        OrderStateUnknownError，避免用不含浮亏的 collateral 冒充权益。
+        """
+        raw_tav = getattr(account, "total_asset_value", None)
+        if raw_tav not in (None, ""):
+            try:
+                tav = Decimal(str(raw_tav))
+                if tav.is_finite():
+                    return tav
+            except Exception:
+                pass
+            if self.strict_order_state:
+                raise OrderStateUnknownError("lighter")
+
+        unrealized = Decimal("0")
+        for pos in (getattr(account, "positions", None) or []):
+            try:
+                size = Decimal(str(getattr(pos, "position", "0") or "0"))
+            except Exception:
+                size = Decimal("0")
+            raw_upnl = getattr(pos, "unrealized_pnl", None)
+            if raw_upnl in (None, ""):
+                if size != 0:
+                    if self.strict_order_state:
+                        raise OrderStateUnknownError("lighter")
+                    logger.warning("[Lighter] 持仓缺少 unrealized_pnl，权益可能偏高")
+                continue
+            try:
+                upnl = Decimal(str(raw_upnl))
+            except Exception:
+                upnl = Decimal("NaN")
+            if not upnl.is_finite():
+                if self.strict_order_state:
+                    raise OrderStateUnknownError("lighter")
+                continue
+            unrealized += upnl
+        return collateral + unrealized
+
     async def get_account_balance(self) -> List[BalanceData]:
         """
         获取账户余额
@@ -919,18 +962,24 @@ class LighterRest(LighterBase):
                     collateral = Decimal(str(getattr(account, "collateral", None)))
                     if not available_balance.is_finite() or not collateral.is_finite():
                         raise OrderStateUnknownError("lighter")
-                # 计算锁定余额（抵押品 - 可用余额）
-                locked = max(collateral - available_balance, Decimal("0"))
+                # 🔥 修复：风控需要“账户权益”（含未实现盈亏），而非 collateral。
+                # Lighter 的 collateral 不随持仓浮动盈亏变化，空单浮亏时余额风控不会触发。
+                # 优先使用 total_asset_value（= collateral + 未实现盈亏），
+                # 缺失时用 collateral + Σ positions.unrealized_pnl 推算。
+                equity = self._resolve_account_equity(account, collateral)
+
+                # 计算锁定余额（权益 - 可用余额）
+                locked = max(equity - available_balance, Decimal("0"))
 
                 # USDC 余额（Lighter是合约交易所，只有USDC保证金）
-                if collateral > 0 or self.strict_order_state:
+                if equity > 0 or collateral > 0 or self.strict_order_state:
                     from datetime import datetime
                     balances.append(BalanceData(
                         currency="USDC",
                         free=available_balance,
                         used=locked,
-                        total=collateral,
-                        usd_value=collateral,
+                        total=equity,
+                        usd_value=equity,
                         timestamp=datetime.now(),
                         raw_data={'source': 'rest',
                                   'account': account}  # 🔥 标记来源
