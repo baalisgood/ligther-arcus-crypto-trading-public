@@ -122,6 +122,8 @@ class SegmentedConfigManager:
             "config/arbitrage/arbitrage_segmented.yaml")
         self.default_config: Optional[SymbolConfig] = None
         self.symbol_configs: Dict[str, SymbolConfig] = {}
+        self._disabled_symbols = set()
+        self._disabled_symbol_configs: Dict[str, SymbolConfig] = {}
         self._config_aliases: Dict[str, str] = {}
         self.system_mode: Dict = {}
         # 🔥 多交易所套利：按交易所对/套利对维度区分配置（兼容旧配置：默认关闭）
@@ -233,15 +235,17 @@ class SegmentedConfigManager:
 
             # 🔧 检查 enabled 开关
             if not config_data.get('enabled', True):
-                logger.info(f"⏸️  跳过已禁用的交易对: {symbol_key}")
-                continue
+                self._disabled_symbols.add(symbol_key)
+                logger.info(f"⏸️  禁止开仓的交易对: {symbol_key}")
 
             try:
-                self.symbol_configs[symbol_key] = self._merge_with_default(
+                configs = (self._disabled_symbol_configs if symbol_key in self._disabled_symbols
+                           else self.symbol_configs)
+                configs[symbol_key] = self._merge_with_default(
                     symbol=symbol_key,
                     config_data=config_data
                 )
-                logger.info(f"✅ 加载交易对配置: {self.symbol_configs[symbol_key]}")
+                logger.info(f"✅ 加载交易对配置: {configs[symbol_key]}")
             except Exception as e:
                 logger.error(f"❌ 加载 {symbol} 配置失败: {e}", exc_info=True)
 
@@ -454,18 +458,13 @@ class SegmentedConfigManager:
         Returns:
             如果有专门配置，返回专门配置；否则返回默认配置
         """
-        key = self._normalize_config_key(symbol)
-        if key in self.symbol_configs:
-            return self.symbol_configs[key]
-
-        alias_target = self._config_aliases.get(key)
-        if alias_target:
-            return self.get_config(alias_target)
-
-        # trading_pair_id 回退：如果存在 token 简写（BTC）配置，则复用
-        short = self._extract_symbol_short_from_trading_pair_id(key)
-        if short and short in self.symbol_configs:
-            return self.symbol_configs[short]
+        for key in self._config_keys(symbol):
+            if key in self._disabled_symbol_configs:
+                return self._disabled_symbol_configs[key]
+            if key in self.symbol_configs:
+                return self.symbol_configs[key]
+            if key in self._disabled_symbols:
+                raise ValueError(f"已禁用的 {key} 配置加载失败")
 
         # 返回默认配置（创建新实例，避免修改原配置）
         if self.default_config:
@@ -478,33 +477,31 @@ class SegmentedConfigManager:
 
         raise ValueError(f"未找到 {symbol} 的配置，且默认配置未设置")
 
-    def is_symbol_enabled(self, symbol: str) -> bool:
-        """
-        检查交易对是否启用
-
-        Args:
-            symbol: 交易对符号
-
-        Returns:
-            如果交易对在 symbol_configs 中且未被禁用，返回 True；否则返回 False
-        """
+    def _config_keys(self, symbol: str) -> list:
+        """按显式配置、别名、币种默认的顺序解析，避免别名循环。"""
+        keys = []
         key = self._normalize_config_key(symbol)
-        # 如果在 symbol_configs 中，说明已启用（因为 enabled: false 的已被过滤）
-        if key in self.symbol_configs:
+        while key and key not in keys:
+            keys.append(key)
+            key = self._config_aliases.get(key)
+        for key in list(keys):
+            short = (self._extract_symbol_short_from_trading_pair_id(key)
+                     or self._extract_symbol_short(key))
+            if short and short not in keys:
+                keys.append(short)
+        return keys
+
+    def is_symbol_explicitly_disabled(self, symbol: str) -> bool:
+        """真实交易腿只检查显式禁用，不能因严格模式缺少腿配置而拒绝套利对。"""
+        return any(key in self._disabled_symbols for key in self._config_keys(symbol))
+
+    def is_symbol_enabled(self, symbol: str) -> bool:
+        """显式禁用优先；严格模式要求配置，兼容模式允许未配置的交易对。"""
+        if self.is_symbol_explicitly_disabled(symbol):
+            return False
+        if any(key in self.symbol_configs for key in self._config_keys(symbol)):
             return True
-        # 检查别名
-        alias_target = self._config_aliases.get(key)
-        if alias_target and self._normalize_config_key(alias_target) in self.symbol_configs:
-            return True
-        # trading_pair_id 回退：BTC
-        short = self._extract_symbol_short_from_trading_pair_id(key)
-        if short and short in self.symbol_configs:
-            return True
-        # ✅ 兼容旧行为：未开启“按交易所对配置”时，缺失配置仍允许走 default_config
-        if not bool(self._exchange_pair_symbol_config_enabled):
-            return True
-        # 已开启严格模式：必须显式配置（pair/token/full/alias）
-        return False
+        return not self._exchange_pair_symbol_config_enabled
 
     def is_exchange_pair_symbol_config_enabled(self) -> bool:
         return bool(self._exchange_pair_symbol_config_enabled)
@@ -525,8 +522,8 @@ class SegmentedConfigManager:
         """
         if not alias or not target_symbol:
             return
-        alias_key = alias.upper()
-        target_key = target_symbol.upper()
+        alias_key = self._normalize_config_key(alias)
+        target_key = self._normalize_config_key(target_symbol)
         if alias_key == target_key:
             return
         self._config_aliases[alias_key] = target_key

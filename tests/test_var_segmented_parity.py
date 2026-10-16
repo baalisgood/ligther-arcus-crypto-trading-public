@@ -431,7 +431,7 @@ def test_bootstrap_cancel_reports_incomplete_and_cleans_both_parallel_reads(orch
     assert not o._bootstrap_positions_done and not o._bootstrap_positions_success and o._bootstrap_positions_block_open
 
 
-def test_actual_subscription_plan_contains_only_five_perpetual_symbols(orchestrator):
+def test_actual_subscription_plan_contains_only_four_perpetual_symbols(orchestrator):
     from core.services.arbitrage_monitor_v2.config.multi_leg_pairs_config import MultiLegPairsConfigManager
     o = orchestrator
     o.multi_leg_pairs = MultiLegPairsConfigManager(ROOT/'config/arbitrage/multi_leg_pairs.yaml').get_pairs()
@@ -440,7 +440,7 @@ def test_actual_subscription_plan_contains_only_five_perpetual_symbols(orchestra
     run(o.bootstrapper._subscribe_market_data())
     o.data_receiver.subscribe_all.assert_awaited_once()
     symbols = o.data_receiver.subscribe_all.await_args.args[0]
-    assert len(symbols) == 5 and set(symbols) == {base+'-USDC-PERP' for base in ('BTC','ETH','BNB','SOL','HYPE')}
+    assert len(symbols) == 4 and set(symbols) == {base+'-USDC-PERP' for base in ('BTC','ETH','SOL','HYPE')}
 
 
 @pytest.mark.parametrize('balance,critical', [('49',True),('149.99',True),('150',False),('199.99',False),('200',False),('278',False),('280',False)])

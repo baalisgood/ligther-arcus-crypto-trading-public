@@ -321,45 +321,23 @@ class SpreadPipeline:
         exchange_a = pair.normalized_exchange_a()
         exchange_b = pair.normalized_exchange_b()
 
-        # ------------------------------------------------------------------
-        # 🔥 多交易所套利：按套利对(AB/AC)独立配置的门控
-        # - 若启用 exchange_pair_symbol_config_enabled：
-        #   - 没有显式配置的套利对：禁止开仓（直接跳过）
-        #   - 但若该套利对已持仓：仍允许走平仓链路（避免“缺配置就无法解套”）
-        # ------------------------------------------------------------------
+        # 禁用或严格模式缺配置时，只保留已有持仓的平仓链路。
         position = orc.decision_engine.get_position(symbol_key)
         has_position = bool(position and position.total_quantity > Decimal("0"))
-        skip_open_due_to_missing_config = False
-        try:
-            cfg_mgr = getattr(orc, "config_manager", None)
-            strict_enabled = bool(
-                cfg_mgr and hasattr(cfg_mgr, "is_exchange_pair_symbol_config_enabled")
-                and cfg_mgr.is_exchange_pair_symbol_config_enabled()
+        cfg_mgr = orc.config_manager
+        skip_open_due_to_missing_config = (
+            not cfg_mgr.is_symbol_enabled(symbol_key)
+            or cfg_mgr.is_symbol_explicitly_disabled(base_symbol)
+        )
+        if skip_open_due_to_missing_config:
+            self._log_warning_throttled(
+                key=f"pair_cfg_blocked:{symbol_key}",
+                message=(f"⛔️ [配置] {symbol_key}: 配置已禁用或未配置，"
+                         + ("已有持仓仅允许平仓。" if has_position else "跳过本套利对。")),
+                interval_seconds=300.0,
             )
-            if strict_enabled and cfg_mgr and (not cfg_mgr.is_symbol_enabled(symbol_key)):
-                if not has_position:
-                    self._log_warning_throttled(
-                        key=f"pair_cfg_missing:open_skip:{symbol_key}",
-                        message=(
-                            f"⛔️ [配置] {symbol_key}: 未找到该套利对的配置（且未配置 token 默认），"
-                            "已跳过本套利对（不计算/不开仓）。"
-                        ),
-                        interval_seconds=300.0,
-                    )
-                    return
-                # 已持仓：允许平仓，但禁止继续加仓
-                skip_open_due_to_missing_config = True
-                self._log_warning_throttled(
-                    key=f"pair_cfg_missing:close_only:{symbol_key}",
-                    message=(
-                        f"⚠️ [配置] {symbol_key}: 未找到该套利对的配置（且未配置 token 默认），"
-                        "但检测到已有持仓：将仅尝试平仓（禁止加仓）。请尽快补齐该套利对配置。"
-                    ),
-                    interval_seconds=300.0,
-                )
-        except Exception:
-            # 配置门控失败不影响主流程
-            skip_open_due_to_missing_config = False
+            if not has_position:
+                return
 
         orderbook_a = orc.data_processor.get_orderbook(
             exchange_a,

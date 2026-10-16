@@ -16,8 +16,6 @@ symbols:
 # 本列表中的交易所/币种标识，按原顺序保留。
 - ETH-USDC-PERP
 # 本列表中的交易所/币种标识，按原顺序保留。
-- BNB-USDC-PERP
-# 本列表中的交易所/币种标识，按原顺序保留。
 - SOL-USDC-PERP
 # 本列表中的交易所/币种标识，按原顺序保留。
 - HYPE-USDC-PERP

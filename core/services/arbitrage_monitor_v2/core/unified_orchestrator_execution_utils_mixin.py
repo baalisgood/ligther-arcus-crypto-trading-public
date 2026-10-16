@@ -154,6 +154,11 @@ class UnifiedOrchestratorExecutionUtilsMixin:
             return fallback if self.monitor_only_mode else Decimal("0")
 
     async def _validate_segmented_open(self, request):
+        if (not self.config_manager.is_symbol_enabled(request.symbol)
+                or any(self.config_manager.is_symbol_explicitly_disabled(leg)
+                       for leg in (getattr(request, "buy_symbol", None),
+                                   getattr(request, "sell_symbol", None)) if leg)):
+            return False, "套利对或交易腿配置已禁用或未配置"
         if request.symbol in getattr(self, "_position_risk_close_reasons", {}):
             return False, "该套利对风控退出中或失败锁存"
         if self._bootstrap_positions_block_open:

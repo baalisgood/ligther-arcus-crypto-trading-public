@@ -115,6 +115,11 @@ class UnifiedDecisionEngine:
         Returns:
             (是否开仓, 开仓数量)
         """
+        if (not self.config_manager.is_symbol_enabled(symbol)
+                or any(self.config_manager.is_symbol_explicitly_disabled(leg)
+                       for leg in (spread_data.buy_symbol, spread_data.sell_symbol) if leg)):
+            return False, Decimal('0')
+
         if self.deduct_fees:
             fees = sum(_round_trip_fee_breakdown(spread_data, self.exchange_order_modes, self.exchange_fee_config))
             spread_data = replace(spread_data, spread_pct=spread_data.spread_pct - fees)

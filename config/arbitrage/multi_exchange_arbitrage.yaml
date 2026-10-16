@@ -9,6 +9,5 @@ counter_exchanges:
 symbols:
 - BTC-USDC-PERP
 - ETH-USDC-PERP
-- BNB-USDC-PERP
 - SOL-USDC-PERP
 - HYPE-USDC-PERP
