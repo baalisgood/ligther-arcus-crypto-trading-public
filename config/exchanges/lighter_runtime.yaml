@@ -1,0 +1,18 @@
+# Public runtime settings. Credentials are read only from project-root .env.
+name: Lighter
+testnet: false
+api_config:
+  testnet: false
+  ws_mainnet_url: wss://mainnet.zklighter.elliot.ai/stream
+  ws_testnet_url: wss://testnet.zklighter.elliot.ai/stream
+extra_params:
+  strict_order_state: true
+subscription_mode:
+  mode: predefined
+  predefined:
+    symbols: []
+    data_types:
+      ticker: true
+      orderbook: true
+      trades: false
+      user_data: true

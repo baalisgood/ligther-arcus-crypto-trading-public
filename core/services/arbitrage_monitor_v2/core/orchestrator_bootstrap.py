@@ -59,13 +59,19 @@ class OrchestratorBootstrap:
         for exchange_name in monitor_config.exchanges:
             logger.info(f"🔧 [统一调度] 正在创建适配器: {exchange_name}")
             try:
-                config_path = Path(f"config/exchanges/{exchange_name}_config.yaml")
+                if exchange_name in ("lighter", "arcus"):
+                    from core.utils.config_loader import PROJECT_ROOT
+                    config_path = PROJECT_ROOT / f"config/exchanges/{exchange_name}_runtime.yaml"
+                else:
+                    config_path = Path(f"config/exchanges/{exchange_name}_config.yaml")
                 exchange_config = None
 
-                if config_path.exists():
+                if config_path.exists() or exchange_name in ("lighter", "arcus"):
                     exchange_config = self._load_exchange_config(
                         exchange_name, config_path, config_loader
                     )
+                    if exchange_name in ("lighter", "arcus") and exchange_config is None:
+                        raise ValueError(f"Missing or invalid public runtime config for {exchange_name}")
 
                 adapter = factory.create_adapter(
                     exchange_id=exchange_name,
@@ -195,7 +201,12 @@ class OrchestratorBootstrap:
             or config_data.get("wallet_address")
             or authentication_config.get("wallet_address")
         )
-        if wallet_address:
+        if exchange_name in ("lighter", "arcus"):
+            api_key, api_secret = auth.api_key, auth.api_secret
+            private_key, wallet_address = auth.private_key, auth.wallet_address
+        if exchange_name in ("lighter", "arcus"):
+            extra_params["wallet_address"] = wallet_address
+        elif wallet_address:
             extra_params.setdefault("wallet_address", wallet_address)
         if auth.jwt_token:
             extra_params["jwt_token"] = auth.jwt_token

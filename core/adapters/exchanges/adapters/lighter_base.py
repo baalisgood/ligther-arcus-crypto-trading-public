@@ -127,29 +127,14 @@ class LighterBase:
         # auth_enabled只控制WebSocket是否订阅账户数据，不影响REST API的余额查询能力
         self.signer_client = None
         
-        # 🔥 优先从环境变量读取认证信息，其次使用配置文件
-        import os
-        api_key_private_key = os.getenv('LIGHTER_API_KEY_PRIVATE_KEY') or self.api_key_private_key
-        
-        env_account_index = os.getenv('LIGHTER_ACCOUNT_INDEX')
-        if env_account_index is not None:
-            account_index = int(env_account_index)
-        elif self.account_index is not None:
-            account_index = self.account_index
-        else:
-            account_index = None
-        
-        env_api_key_index = os.getenv('LIGHTER_API_KEY_INDEX')
-        if env_api_key_index is not None:
-            api_key_index = int(env_api_key_index)
-        elif self.api_key_index is not None:
-            api_key_index = self.api_key_index
-        else:
-            api_key_index = None
-        
+        # Credentials were resolved by the adapter from project-root .env.
+        api_key_private_key = self.api_key_private_key
+        account_index = self.account_index
+        api_key_index = self.api_key_index
+
         if account_index is not None and api_key_private_key:
             try:
-                # 更新实例属性（使用环境变量的值）
+                # 同步传入的认证配置
                 self.api_key_private_key = api_key_private_key
                 self.account_index = account_index
                 self.api_key_index = api_key_index
@@ -162,7 +147,7 @@ class LighterBase:
                     api_key_private_key=api_key_private_key,
                 )
                 
-                key_source = "环境变量" if os.getenv('LIGHTER_API_KEY_PRIVATE_KEY') else "配置文件"
+                key_source = "项目根 .env"
                 logger.info(
                     f"✅ [LighterBase] SignerClient初始化成功: "
                     f"account_index={account_index}, api_key_index={api_key_index} (从{key_source})"

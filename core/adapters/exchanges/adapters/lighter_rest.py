@@ -284,39 +284,14 @@ class LighterRest(LighterBase):
             self.candlestick_api = CandlestickApi(self.api_client)
             self.funding_api = FundingApi(self.api_client)
 
-            # 🔥 从环境变量或配置文件加载认证信息（优先使用环境变量）
-            # 优先使用环境变量，如果没有则使用配置文件的值
-            api_key_private_key = os.getenv(
-                'LIGHTER_API_KEY_PRIVATE_KEY') or self.api_key_private_key
-
-            # account_index: 优先环境变量，其次配置文件，最后默认None
-            env_account_index = os.getenv('LIGHTER_ACCOUNT_INDEX')
-            if env_account_index is not None:
-                account_index = int(env_account_index)
-            elif self.account_index is not None:
-                account_index = self.account_index
-            else:
-                account_index = None
-
-            # api_key_index: 优先环境变量，其次配置文件，最后默认None
-            env_api_key_index = os.getenv('LIGHTER_API_KEY_INDEX')
-            if env_api_key_index is not None:
-                api_key_index = int(env_api_key_index)
-            elif self.api_key_index is not None:
-                api_key_index = self.api_key_index
-            else:
-                api_key_index = None
+            api_key_private_key = self.api_key_private_key
+            account_index = self.account_index
+            api_key_index = self.api_key_index
 
             # 🔥 即使auth_enabled=False，如果配置了认证信息，也初始化SignerClient用于REST API查询
             # auth_enabled只控制WebSocket是否订阅账户数据，不影响REST API的余额查询能力
             if account_index is not None and api_key_private_key:
-                # 显示认证信息来源
-                key_source = "环境变量" if os.getenv(
-                    'LIGHTER_API_KEY_PRIVATE_KEY') else "配置文件"
-                account_source = "环境变量" if os.getenv(
-                    'LIGHTER_ACCOUNT_INDEX') else "配置文件"
-                api_key_index_source = "环境变量" if os.getenv(
-                    'LIGHTER_API_KEY_INDEX') else "配置文件"
+                key_source = account_source = api_key_index_source = "项目根 .env"
 
                 logger.info(
                     f"✅ Lighter 认证信息加载成功:\n"
@@ -1469,7 +1444,7 @@ class LighterRest(LighterBase):
         if not self.signer_client:
             # 🔥 只写入日志文件，不输出到控制台（避免UI抖动）
             logger.debug(
-                "未配置SignerClient，无法下单（请检查lighter_config.yaml中的api_key_private_key和account_index）")
+                "未配置SignerClient，无法下单（请检查项目根.env中的LIGHTER_API_KEY_PRIVATE_KEY和LIGHTER_ACCOUNT_INDEX）")
             return False
         return True
 

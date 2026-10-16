@@ -130,13 +130,14 @@ pip install -r requirements-py312.txt
 
 ### 配置 API 密钥
 
-在 `config/exchanges/` 目录下配置对应交易所的 API 密钥：
+Lighter / Arcus 只从项目根目录 `.env` 读取凭据。首次安装执行 `cp -n env.template .env`、`chmod 600 .env`，填写模板中的三项 `LIGHTER_*` 和四项 `ARCUS_*` 字段；已有 `.env` 请直接编辑。shell 环境变量和旧认证 YAML 不作为这两家的凭据来源。公开运行配置为 `config/exchanges/lighter_runtime.yaml` 与 `arcus_runtime.yaml`，不得将 `.env` 提交到 Git。
+
+其他交易所按各自配置方式填写：
 
 ```bash
 config/exchanges/
 ├── hyperliquid_config.yaml   # Hyperliquid 配置
 ├── backpack_config.yaml       # Backpack 配置
-├── lighter_config.yaml        # Lighter 配置
 ├── binance_config.yaml        # Binance 配置
 ├── okx_config.yaml            # OKX 配置
 ├── edgex_config.yaml          # EdgeX 配置
@@ -1122,16 +1123,19 @@ API 层 (api/)
 
 ### 1. 如何配置 API 密钥？
 
-在 `config/exchanges/` 目录下找到对应交易所的配置文件，填入 API 密钥：
+Lighter / Arcus：在项目根目录 `.env` 填写以下字段，索引 0 有效；Arcus signing key 是独立 API Ed25519 seed，不能使用钱包主私钥。
 
-```yaml
-# config/exchanges/lighter_config.yaml 示例
-api_config:
-  auth:
-    api_key_private_key: "你的API密钥私钥"
-    account_index: 0
-    api_key_index: 0
+```dotenv
+LIGHTER_API_KEY_PRIVATE_KEY=
+LIGHTER_ACCOUNT_INDEX=0
+LIGHTER_API_KEY_INDEX=0
+ARCUS_API_KEY=
+ARCUS_API_SIGNING_KEY=
+ARCUS_WALLET_ADDRESS=
+ARCUS_ACCOUNT_INDEX=0
 ```
+
+完整首次安装步骤见 [DEPLOYMENT.md](DEPLOYMENT.md)。其他交易所沿用各自配置文件/环境变量方式。
 
 ### 2. 如何添加新的交易对？
 

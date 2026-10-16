@@ -1,0 +1,8 @@
+# Public runtime settings. Credentials are read only from project-root .env.
+name: Arcus
+testnet: false
+api:
+  base_url: https://api.arcus.xyz
+  ws_url: wss://api.arcus.xyz/v1/ws
+extra_params:
+  strict_order_state: true

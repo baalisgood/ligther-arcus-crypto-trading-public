@@ -660,9 +660,9 @@ def test_lighter_live_extra_params_propagate_through_real_bootstrap_without_dote
     from core.services.arbitrage_monitor_v2.core.orchestrator_bootstrap import OrchestratorBootstrap
     loader=SimpleNamespace(load_auth_config=lambda *args,**kwargs:AuthConfig())
     bootstrap=object.__new__(OrchestratorBootstrap)
-    cfg=bootstrap._load_exchange_config('lighter',Path('config/exchanges/lighter_config.yaml'),loader)
+    cfg=bootstrap._load_exchange_config('lighter',Path('config/exchanges/lighter_runtime.yaml'),loader)
     assert cfg.extra_params['strict_order_state'] is True
-    static=yaml.safe_load(Path('config/exchanges/lighter_config.yaml').read_text())
+    static=yaml.safe_load(Path('config/exchanges/lighter_runtime.yaml').read_text())
     stub=SimpleNamespace(logger=None,_load_lighter_config=lambda:static)
     assert LighterAdapter._convert_config_to_dict(stub,cfg)['strict_order_state'] is True
 

@@ -16,6 +16,15 @@
 
 配置：`arbitrage_segmented.yaml` 是分段/风控；`arbitrage_lighter_arcus.yaml` 是专用执行；`monitor_lighter_arcus.yaml` 是行情，`multi_exchange_arbitrage.yaml` 是五币双向配对。真实私钥/环境文件由用户自行保管与填写，不放入迁移证据。
 
+首次从公开仓库安装时，在项目根目录运行 `cp env.template .env`，填写以下七个字段：
+
+- `LIGHTER_API_KEY_PRIVATE_KEY`、`LIGHTER_ACCOUNT_INDEX`、`LIGHTER_API_KEY_INDEX`
+- `ARCUS_API_KEY`、`ARCUS_API_SIGNING_KEY`、`ARCUS_WALLET_ADDRESS`、`ARCUS_ACCOUNT_INDEX`
+
+两家凭据只从代码所在项目根目录的 `.env` 读取，不使用 shell 环境变量、当前工作目录 `.env` 或旧 `*_config.yaml` 认证字段。索引 0 有效；缺失、空值和非法索引会拒绝初始化。Arcus signing key 使用独立 Ed25519 API seed，不能填写钱包主私钥。`.env` 已被 Git 忽略，不得上传。
+
+可公开的端点、订阅模式和严格订单状态设置位于 `config/exchanges/lighter_runtime.yaml` 与 `arcus_runtime.yaml`，不需要私有交易所 YAML。Lighter 连接后每 30 秒发送 JSON `pong`；出站保活和收到的 ping/pong 不刷新业务数据时间，行情静默仍会触发超时重连。
+
 当前启动方式（这里只列文档，未执行）：
 
 ```bash

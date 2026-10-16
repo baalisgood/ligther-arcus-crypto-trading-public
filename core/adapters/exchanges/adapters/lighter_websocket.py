@@ -737,6 +737,8 @@ class LighterWebSocket(LighterBase):
                 except asyncio.CancelledError:
                     pass
             
+            self._heartbeat_task = None
+
             if self._data_timeout_task and not self._data_timeout_task.done():
                 self._data_timeout_task.cancel()
                 try:
@@ -1090,7 +1092,7 @@ class LighterWebSocket(LighterBase):
             logger.info("ℹ️  [Lighter] WebSocket未连接，跳过账户订阅")
             return
 
-        if not self.account_index:
+        if self.account_index is None:
             logger.warning("⚠️ [Lighter] account_index 未配置，无法订阅账户频道")
             return
 
@@ -2182,7 +2184,7 @@ class LighterWebSocket(LighterBase):
 
     async def _create_auth_token(self) -> Optional[str]:
         """根据配置生成认证Token（公共模式下返回None）"""
-        if not (self.auth_enabled and self.account_index and self.signer_client):
+        if not (self.auth_enabled and self.account_index is not None and self.signer_client):
             return None
 
         try:
@@ -2234,6 +2236,8 @@ class LighterWebSocket(LighterBase):
                     self._network_bytes_received = 0
                     self._network_bytes_sent = 0
                     logger.info("✅ [Lighter] WebSocket已连接（直接订阅模式）")
+
+                    self._heartbeat_task = asyncio.create_task(self._heartbeat_loop(ws))
 
                     # 启动数据超时检测
                     if self._data_timeout_task and not self._data_timeout_task.done():
@@ -2300,6 +2304,7 @@ class LighterWebSocket(LighterBase):
                 except asyncio.CancelledError:
                     pass
                 logger.debug("✅ [Lighter重连] 心跳任务已取消")
+            self._heartbeat_task = None
             
             # 3. 关闭旧的WebSocket连接
             # 🔥 关键修复：确保完全关闭WebSocket连接，包括发送close frame
@@ -2347,66 +2352,22 @@ class LighterWebSocket(LighterBase):
         except Exception as e:
             logger.error(f"❌ [Lighter重连] 清理旧连接时出错: {e}", exc_info=True)
     
-    async def _heartbeat_loop(self):
-        """
-        🚀 主动心跳任务：定期发送 pong 保持连接活跃
-        
-        参考测试脚本 test_sol_orderbook.py 的稳定连接方案：
-        - 首次等待30秒后发送pong
-        - 然后每30秒主动发送一次pong
-        - 确保即使在低活跃期也能保持连接
-        - 🔥 增强：检查连接状态和数据活跃度
-        """
+    async def _heartbeat_loop(self, ws):
+        """Send JSON pong every 30 seconds without advancing receive freshness."""
         try:
-            await asyncio.sleep(30)  # 首次等待 30 秒（提前发送）
-            
-            while self._running:
-                try:
-                    if self._direct_ws:
-                        # 🔥 修复：发送心跳前更新最后活动时间（关键修复）
-                        current_time = time.time()
-                        # 先检查数据活跃度（在更新前）
-                        silence_time_before = current_time - self._last_message_time if self._last_message_time > 0 else 0
-                        
-                        if silence_time_before > 60:
-                            logger.warning(
-                                f"⚠️  [主动心跳] 数据静默时间: {silence_time_before:.1f}秒 "
-                                f"(最后消息: {self._last_message_time:.1f})"
-                            )
-                        
-                        # 🔥 关键修复：更新最后消息时间，避免数据超时检测误判
-                        self._last_message_time = current_time
-                        
-                        # 主动发送 pong
-                        try:
-                            pong_msg = json.dumps({"type": "pong"})
-                            await self._direct_ws.send(pong_msg)
-                            self._network_bytes_sent += len(pong_msg.encode('utf-8'))
-                            # 🔥 INFO级别，但控制频率（每30秒记录一次）
-                            current_time = time.time()
-                            if current_time - self._last_heartbeat_log_time >= self._heartbeat_log_interval:
-                                logger.info(f"[Lighter] 心跳: 发送pong (静默时间: {silence_time_before:.1f}s)")
-                                self._last_heartbeat_log_time = current_time
-                        except Exception as send_error:
-                            # 🔥 心跳发送失败，记录错误
-                            logger.error(f"❌ [主动心跳] 发送 pong 失败: {send_error}")
-                            raise  # 重新抛出异常，让外层处理
-                    else:
-                        logger.debug("⚠️  [主动心跳] WebSocket 已关闭，停止心跳")
-                        break
-                        
-                except Exception as e:
-                    logger.warning(f"❌ [主动心跳] 发送失败: {e}")
-                    break
-                
-                # 每 30 秒发送一次（更激进，确保不超时）
+            while self._running and self._direct_ws is ws:
                 await asyncio.sleep(30)
-                
+                if not self._running or self._direct_ws is not ws:
+                    break
+                message = json.dumps({"type": "pong"})
+                await ws.send(message)
+                self._network_bytes_sent += len(message.encode('utf-8'))
         except asyncio.CancelledError:
-            logger.debug("💔 主动心跳任务已取消")
-        except Exception as e:
-            logger.error(f"❌ 主动心跳任务异常: {e}")
-    
+            raise
+        except Exception:
+            logger.warning("[Lighter] 主动心跳发送失败，关闭当前连接")
+            await ws.close()
+
     def _parse_orderbook_timestamp(self, order_book: Dict[str, Any]) -> Optional[datetime]:
         for field in ("timestamp", "last_updated_at"):
             parsed = self._parse_timestamp_value(order_book.get(field))
@@ -2559,7 +2520,7 @@ class LighterWebSocket(LighterBase):
                 and str(data.get("account", self.account_index)) == str(self.account_index))
             # 🔥 修复：在函数开始处定义channel，确保所有分支都能使用
             self._last_message_time = time.time()
-            if normalized_msg_type != "ping":
+            if normalized_msg_type not in ("ping", "pong"):
                 self._last_business_message_time = self._last_message_time
                 self._ws_manual_health_ping_sent = False
             
@@ -2583,6 +2544,9 @@ class LighterWebSocket(LighterBase):
                     except Exception as e:
                         logger.error(f"❌ [Lighter心跳] 回复pong失败: {e}")
                 return  # ping/pong 不需要进一步处理，立即返回
+
+            if normalized_msg_type == "pong":
+                return
 
             # 🔥 处理订阅确认消息（subscribed/account_all）- 包含初始余额数据
             if msg_type == "subscribed/account_all":

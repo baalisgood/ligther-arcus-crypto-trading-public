@@ -142,127 +142,36 @@ class LighterAdapter(ExchangeAdapter):
         return getattr(self._rest, "_uncertain_orders", {})
 
     def _convert_config_to_dict(self, config: ExchangeConfig) -> Dict[str, Any]:
-        """
-        将ExchangeConfig转换为字典
-
-        如果ExchangeConfig中没有Lighter特有的配置，则从lighter_config.yaml加载
-
-        Args:
-            config: ExchangeConfig对象
-
-        Returns:
-            配置字典
-        """
-        # 🔥 优先从配置文件加载完整配置（包括api_config结构）
-        try:
-            lighter_config = self._load_lighter_config()
-            
-            # 🔥 检查配置是否加载成功
-            if not lighter_config or lighter_config == {'exchange_id': 'lighter'}:
-                raise ValueError("配置文件加载失败或为空")
-            
-            api_config = lighter_config.get('api_config', {})
-            
-            # 🔥 检查api_config是否存在
-            if not api_config:
-                if self.logger:
-                    self.logger.warning("⚠️ 配置文件中未找到api_config，使用默认配置")
-                raise ValueError("api_config不存在")
-            
-            # 构建配置字典，保持api_config结构
-            config_dict = {
-                "testnet": api_config.get('testnet', False),
-                "api_config": api_config,  # 🔥 保持完整的api_config结构
-            }
-            
-            # 向后兼容：也提供顶层配置项
-            auth_config = api_config.get('auth', {})
-            if not isinstance(auth_config, dict):
-                auth_config = {}
-                api_config['auth'] = auth_config
-            
-            # 🔥 优先使用环境变量（从 ExchangeConfig 传入的值）
-            # ExchangeConfigLoader 已经处理了环境变量优先级
-            env_private_key = getattr(config, 'api_key_private_key', '') or auth_config.get('api_key_private_key', '')
-            env_account_index = getattr(config, 'account_index', 0) or auth_config.get('account_index', 0)
-            env_api_key_index = getattr(config, 'api_key_index', 0) or auth_config.get('api_key_index', 0)
-            
-            # 更新顶层配置（供旧逻辑使用）
-            config_dict['api_key_private_key'] = env_private_key
-            config_dict['account_index'] = env_account_index
-            config_dict['api_key_index'] = env_api_key_index
-            
-            # ⚙️ 同步更新嵌套的 auth 配置，确保 REST/WebSocket 都能读取到
-            if env_private_key:
-                auth_config['api_key_private_key'] = env_private_key
-            if env_account_index:
-                auth_config['account_index'] = env_account_index
-            if env_api_key_index:
-                auth_config['api_key_index'] = env_api_key_index
-            
-            # 如果有私钥，自动启用认证
-            has_auth = bool(env_private_key)
-            auth_enabled = has_auth or auth_config.get('enabled', False)
-            auth_config['enabled'] = auth_enabled
-            config_dict['auth_enabled'] = auth_enabled
-            
-            # 🔥 调试：记录配置加载状态（同时输出嵌套auth的值）
-            if self.logger:
-                api_key_len = len(env_private_key) if env_private_key else 0
-                self.logger.info(
-                    f"📋 [Lighter配置] auth_enabled={auth_enabled}, account_index={env_account_index}, "
-                    f"api_key_index={env_api_key_index}, api_key_len={api_key_len}"
-                )
-                self.logger.info(
-                    "📋 [Lighter配置验证] auth.enabled=%s, account_index=%s, api_key_index=%s",
-                    auth_config.get('enabled'),
-                    auth_config.get('account_index'),
-                    auth_config.get('api_key_index'),
-                )
-            
-            # 🔥 提取WebSocket URL到顶层（供LighterBase使用）
-            config_dict['ws_mainnet_url'] = api_config.get('ws_mainnet_url', '')
-            config_dict['ws_testnet_url'] = api_config.get('ws_testnet_url', '')
-            if 'api_url' in api_config:
-                config_dict['api_url'] = api_config['api_url']
-            
-            if self.logger:
-                self.logger.info("✅ 从lighter_config.yaml加载API配置")
-        except Exception as e:
-            if self.logger:
-                self.logger.warning(f"⚠️ 无法从配置文件加载Lighter配置: {e}，使用环境变量配置")
-            # 从环境变量构建配置
-            api_key_private_key = getattr(config, 'api_key_private_key', '')
-            account_index = getattr(config, 'account_index', 0)
-            api_key_index = getattr(config, 'api_key_index', 0)
-            
-            # 🔥 如果环境变量中有私钥，自动启用认证
-            auth_enabled = bool(api_key_private_key)
-            
-            config_dict = {
-                "testnet": getattr(config, 'testnet', False),
-                "api_key_private_key": api_key_private_key,
-                "account_index": account_index,
-                "api_key_index": api_key_index,
-                "auth_enabled": auth_enabled,
-            }
-            
-            if self.logger:
-                self.logger.info(f"📋 [Lighter环境变量配置] auth_enabled={auth_enabled}, account_index={account_index}, api_key_index={api_key_index}")
-
-        # 添加可选配置
-        if hasattr(config, 'api_url'):
-            config_dict['api_url'] = config.api_url
-        if hasattr(config, 'ws_url'):
+        """Combine public runtime settings with the credentials loaded from root .env."""
+        runtime = self._load_lighter_config()
+        api_config = runtime.get('api_config', {})
+        auth_config = {
+            'enabled': bool(getattr(config, 'api_key_private_key', '')),
+            'api_key_private_key': getattr(config, 'api_key_private_key', ''),
+            'account_index': getattr(config, 'account_index', 0),
+            'api_key_index': getattr(config, 'api_key_index', 0),
+        }
+        api_config['auth'] = auth_config
+        config_dict = dict(runtime)
+        config_dict.update(auth_config)
+        config_dict.update({
+            'api_config': api_config,
+            'auth_enabled': auth_config['enabled'],
+            'testnet': config.testnet,
+            'ws_mainnet_url': api_config.get('ws_mainnet_url', ''),
+            'ws_testnet_url': api_config.get('ws_testnet_url', ''),
+            'strict_order_state': bool((config.extra_params or {}).get('strict_order_state', False)),
+        })
+        if config.base_url:
+            config_dict['api_url'] = config.base_url
+        if config.ws_url:
             config_dict['ws_url'] = config.ws_url
-
-        config_dict["strict_order_state"] = bool((config.extra_params or {}).get("strict_order_state", False))
         return config_dict
 
     def _load_lighter_config(self) -> Dict[str, Any]:
         """加载Lighter配置文件"""
-        from pathlib import Path
-        config_path = Path("config/exchanges/lighter_config.yaml")
+        from core.utils.config_loader import PROJECT_ROOT
+        config_path = PROJECT_ROOT / "config/exchanges/lighter_runtime.yaml"
 
         try:
             with open(config_path, 'r', encoding='utf-8') as f:

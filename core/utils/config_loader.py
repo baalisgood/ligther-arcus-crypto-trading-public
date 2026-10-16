@@ -1,14 +1,18 @@
 """
 统一配置加载工具
-优先级：环境变量 > YAML配置文件 > 默认值
+Lighter/Arcus: 仅项目根 .env；其他交易所: 环境变量 > YAML配置文件 > 默认值
 支持所有交易所的 API 密钥安全加载
 """
 
 import os
 import yaml
+from dotenv import dotenv_values
 from pathlib import Path
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass
@@ -85,6 +89,9 @@ class ExchangeConfigLoader:
             >>> auth = loader.load_auth_config('paradex')
             >>> print(auth.api_key)  # 自动从环境变量或配置文件读取
         """
+        if exchange_name.lower() in ("lighter", "arcus"):
+            return self._load_project_auth(exchange_name.lower())
+
         exchange_upper = exchange_name.upper()
         auth_config = AuthConfig()
         
@@ -117,19 +124,30 @@ class ExchangeConfigLoader:
             yaml_config = self._load_yaml_config(exchange_name, config_file)
             self._merge_yaml_to_auth(auth_config, yaml_config, exchange_name)
         
-        if exchange_name.lower() == 'arcus':
-            arcus_yaml = self._load_yaml_config(exchange_name, config_file)
-            arcus_auth = arcus_yaml.get('authentication', {})
-            auth_config.api_signing_key = (os.getenv('ARCUS_API_SIGNING_KEY', '') if use_env else '') or arcus_auth.get('api_signing_key', '')
-            auth_config.wallet_address = auth_config.wallet_address or arcus_auth.get('wallet_address', '')
-            index = (os.getenv('ARCUS_ACCOUNT_INDEX') if use_env else None)
-            if index is None:
-                index = arcus_auth.get('account_index', 0)
-            auth_config.account_index = int(index)
-            if not 0 <= auth_config.account_index <= 9:
-                raise ValueError('ARCUS_ACCOUNT_INDEX must be 0..9')
         return auth_config
     
+    def _load_project_auth(self, exchange_name: str) -> AuthConfig:
+        # Do not interpolate shell values or search the working directory for credentials.
+        values = dotenv_values(PROJECT_ROOT / ".env", interpolate=False)
+        fields = (['api_key_private_key', 'account_index', 'api_key_index']
+                  if exchange_name == 'lighter' else
+                  ['api_key', 'api_signing_key', 'wallet_address', 'account_index'])
+        auth = AuthConfig()
+        for field in fields:
+            name = self.ENV_KEY_PATTERNS[field].format(EXCHANGE=exchange_name.upper())
+            value = values.get(name)
+            if value is None or not value.strip():
+                raise ValueError(f"Missing {name} in project-root .env")
+            value = value.strip()
+            if field in ('account_index', 'api_key_index'):
+                if not value.isascii() or not value.isdecimal():
+                    raise ValueError(f"{name} must be a non-negative integer")
+                value = int(value)
+                if exchange_name == 'arcus' and value > 9:
+                    raise ValueError('ARCUS_ACCOUNT_INDEX must be 0..9')
+            setattr(auth, field, value)
+        return auth
+
     def _load_yaml_config(
         self, 
         exchange_name: str, 

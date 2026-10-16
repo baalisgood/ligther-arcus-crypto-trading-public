@@ -2,9 +2,20 @@
 
 Public snapshot: https://github.com/baalisgood/ligther-arcus-crypto-trading-public
 
-Use Linux with Bash and `flock`. Create the project-local `.venv` with the required Python runtime and dependencies before starting. The launcher uses `.venv/bin/python`; an existing runtime can be selected with `ARBITRAGE_PYTHON`. Configure credentials locally using the supplied templates. This repository contains no exchange credentials, account data, or server environment files. Keep local credentials out of Git and restrict their permissions.
+Use Linux with Bash and `flock`. Create the project-local `.venv` with the required Python runtime and dependencies before starting. The launcher uses `.venv/bin/python`; an existing runtime can be selected with `ARBITRAGE_PYTHON`. Configure credentials locally using the root `env.template`. This repository contains no exchange credentials, account data, or server environment files. Keep local credentials out of Git and restrict their permissions.
 
-Run these commands from the cloned project directory:
+From the cloned project directory, create the fixed root credentials file without overwriting an existing one:
+
+```bash
+cp -n env.template .env
+chmod 600 .env
+```
+
+Edit `.env` locally and fill all seven fields: `LIGHTER_API_KEY_PRIVATE_KEY`, `LIGHTER_ACCOUNT_INDEX`, `LIGHTER_API_KEY_INDEX`, `ARCUS_API_KEY`, `ARCUS_API_SIGNING_KEY`, `ARCUS_WALLET_ADDRESS`, `ARCUS_ACCOUNT_INDEX`. Zero is a valid index; Arcus account indices are 0–9. Use a dedicated Arcus Ed25519 API signing seed, never a wallet private key. Missing/empty fields and invalid indices reject initialization. Do not commit or upload `.env`.
+
+Lighter and Arcus credentials are read only from this project's root `.env`, regardless of the working directory. Shell environment variables and legacy authentication YAML do not override or fill missing values. Public runtime settings ship in `config/exchanges/lighter_runtime.yaml` and `config/exchanges/arcus_runtime.yaml`; no private exchange YAML is required.
+
+After installing dependencies and completing the credentials file, run:
 
 ```bash
 bash start.sh monitor

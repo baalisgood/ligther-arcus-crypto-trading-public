@@ -5,7 +5,9 @@
 *.key
 *.p12
 *.pfx
-config/exchanges/
+config/exchanges/*
+!config/exchanges/lighter_runtime.yaml
+!config/exchanges/arcus_runtime.yaml
 /logs/
 /data/
 /run/
